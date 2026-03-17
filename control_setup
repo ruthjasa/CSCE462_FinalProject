@@ -1,15 +1,15 @@
 import RPi.GPIO as GPIO
 import time
 
-PWM_PIN = 18  # Must be a PWM-capable pin
+PWM_PIN = 18
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(PWM_PIN, GPIO.OUT)
 
-pwm = GPIO.PWM(PWM_PIN, 50)  # 50 Hz (standard for ESCs)
-pwm.start(7.5)  # Neutral (stop)
+pwm = GPIO.PWM(PWM_PIN, 50) 
+pwm.start(7.5)  # stop
 
-# ---- CONTROL FUNCTIONS ----
+# control
 
 def stop():
     pwm.ChangeDutyCycle(7.5)
@@ -23,25 +23,25 @@ def reverse(speed=1.0):
     duty = 7.5 - (speed * 2.5)  # down to ~5
     pwm.ChangeDutyCycle(duty)
 
-# ---- FLIP FUNCTION ----
+# flip
 
 def flip_cycle():
     print("Flipping...")
 
     # Forward (flip)
     forward(0.8)
-    time.sleep(0.4)   # 🔥 TUNE THIS
+    time.sleep(0.4) 
 
     stop()
     time.sleep(0.3)
 
     # Reverse (return)
     reverse(0.6)
-    time.sleep(0.4)   # 🔥 TUNE THIS
+    time.sleep(0.4)
 
     stop()
 
-# ---- MAIN LOOP ----
+# loop
 
 try:
     while True:
