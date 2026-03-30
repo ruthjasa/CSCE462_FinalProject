@@ -29,6 +29,11 @@ Ultraplanetary Encoder wiring to Raspberry Pi:
   Encoder VCC -> Pi 3.3V   (Ultraplanetary encoder is 3.3V safe)
   Encoder GND -> Pi GND
 
+Optional button (active LOW, internal pull-up):
+  One side -> GPIO 21
+  Other side -> GND
+  Set BUTTON_PIN = None to disable and run in continuous auto-loop mode.
+
 BTS7960 control inputs accept 3.3-5V so Pi GPIO levels are fine directly.
 """
 
@@ -39,15 +44,16 @@ import threading
 # ─────────────────────────────────────────────────────────
 # Pin Assignments
 # ─────────────────────────────────────────────────────────
-RPWM_PIN = 12   # Forward PWM  -> BTS7960 RPWM (pin 1)
-LPWM_PIN = 13   # Reverse PWM  -> BTS7960 LPWM (pin 2)
-R_EN_PIN = 16   # Forward enable -> BTS7960 R_EN (pin 3)
-L_EN_PIN = 20   # Reverse enable -> BTS7960 L_EN (pin 4)
+RPWM_PIN   = 12   # Forward PWM    -> BTS7960 RPWM (pin 1)
+LPWM_PIN   = 13   # Reverse PWM    -> BTS7960 LPWM (pin 2)
+R_EN_PIN   = 16   # Forward enable -> BTS7960 R_EN  (pin 3)
+L_EN_PIN   = 20   # Reverse enable -> BTS7960 L_EN  (pin 4)
+ENC_A      = 23   # Encoder channel A
+ENC_B      = 24   # Encoder channel B
+BUTTON_PIN = 21   # Momentary push-button trigger (set to None for auto-loop mode)
 
-ENC_A    = 23   # Encoder channel A
-ENC_B    = 24   # Encoder channel B
-
-PWM_FREQ = 1000  # Hz (BTS7960 supports up to 25 kHz; 1 kHz is smooth and safe)
+PWM_FREQ   = 1000  # Hz (BTS7960 supports up to 25 kHz; 1 kHz is smooth and safe)
+MIN_DUTY   = 15.0  # % minimum duty cycle to guarantee motor movement under load
 
 # ─────────────────────────────────────────────────────────
 # Motion Parameters  (tune after physical build)
@@ -62,6 +68,10 @@ PWM_FREQ = 1000  # Hz (BTS7960 supports up to 25 kHz; 1 kHz is smooth and safe)
 TICKS_TO_APEX   = 400    # ticks: home -> flip apex  (measure empirically)
 TARGET_HOME     = 0      # ticks at resting/home position
 
+# Phase waypoints derived from TICKS_TO_APEX
+RAMP_END_TICKS  = TICKS_TO_APEX // 2        # end of gentle launch (50% of arc)
+ACCEL_END_TICKS = int(TICKS_TO_APEX * 0.80) # end of full-speed phase (80% of arc)
+
 RAMP_UP_SPEED   = 0.50   # 0.0-1.0 fraction of full PWM duty
 FLIP_SPEED      = 0.80   # speed during main arc
 RAMP_DOWN_SPEED = 0.35   # speed approaching apex
@@ -74,6 +84,7 @@ DWELL_APEX      = 0.20   # seconds to hold at apex (food is airborne)
 DWELL_HOME      = 0.10   # seconds to settle at home before next flip
 
 MOTION_TIMEOUT  = 4.0    # seconds: abort move if it takes longer than this
+STALL_TIMEOUT   = 0.5    # seconds: abort if position doesn't change while driving
 
 # ─────────────────────────────────────────────────────────
 # Encoder State  (updated by GPIO interrupt)
@@ -88,12 +99,12 @@ def _encoder_isr(channel):
     a = GPIO.input(ENC_A)
     b = GPIO.input(ENC_B)
     if a != _last_enc_a:
+        _last_enc_a = a
         with _encoder_lock:
             if a == b:
                 _encoder_pos += 1
             else:
                 _encoder_pos -= 1
-        _last_enc_a = a
 
 def get_pos():
     with _encoder_lock:
@@ -105,30 +116,49 @@ def zero_encoder():
         _encoder_pos = 0
 
 # ─────────────────────────────────────────────────────────
-# GPIO & PWM Setup
+# GPIO & PWM Setup / Teardown
 # ─────────────────────────────────────────────────────────
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)
+rpwm = None
+lpwm = None
 
-GPIO.setup(RPWM_PIN, GPIO.OUT)
-GPIO.setup(LPWM_PIN, GPIO.OUT)
-GPIO.setup(R_EN_PIN, GPIO.OUT)
-GPIO.setup(L_EN_PIN, GPIO.OUT)
-GPIO.setup(ENC_A,    GPIO.IN, pull_up_down=GPIO.PUD_UP)
-GPIO.setup(ENC_B,    GPIO.IN, pull_up_down=GPIO.PUD_UP)
+def setup():
+    """Initialize GPIO pins and PWM channels. Must be called once before use."""
+    global rpwm, lpwm
 
-# Both enable lines must be HIGH for the BTS7960 to drive the motor
-GPIO.output(R_EN_PIN, GPIO.HIGH)
-GPIO.output(L_EN_PIN, GPIO.HIGH)
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
 
-# Two independent PWM channels, one per direction
-rpwm = GPIO.PWM(RPWM_PIN, PWM_FREQ)
-lpwm = GPIO.PWM(LPWM_PIN, PWM_FREQ)
-rpwm.start(0)   # 0% duty = stopped
-lpwm.start(0)
+    GPIO.setup(RPWM_PIN, GPIO.OUT)
+    GPIO.setup(LPWM_PIN, GPIO.OUT)
+    GPIO.setup(R_EN_PIN, GPIO.OUT)
+    GPIO.setup(L_EN_PIN, GPIO.OUT)
+    GPIO.setup(ENC_A,    GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.setup(ENC_B,    GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-# Interrupt on both edges of ENC_A for full quadrature decoding
-GPIO.add_event_detect(ENC_A, GPIO.BOTH, callback=_encoder_isr)
+    if BUTTON_PIN is not None:
+        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+    # Both enable lines must be HIGH for the BTS7960 to drive the motor
+    GPIO.output(R_EN_PIN, GPIO.HIGH)
+    GPIO.output(L_EN_PIN, GPIO.HIGH)
+
+    # Two independent PWM channels, one per direction
+    rpwm = GPIO.PWM(RPWM_PIN, PWM_FREQ)
+    lpwm = GPIO.PWM(LPWM_PIN, PWM_FREQ)
+    rpwm.start(0)   # 0% duty = stopped
+    lpwm.start(0)
+
+    # Interrupt on both edges of ENC_A for full quadrature decoding
+    GPIO.add_event_detect(ENC_A, GPIO.BOTH, callback=_encoder_isr)
+
+def teardown():
+    """Stop PWM and release all GPIO resources. Call on exit."""
+    stop()
+    if rpwm is not None:
+        rpwm.stop()
+    if lpwm is not None:
+        lpwm.stop()
+    GPIO.cleanup()
 
 # ─────────────────────────────────────────────────────────
 # Low-Level Motor Commands
@@ -142,8 +172,10 @@ def drive_forward(speed: float):
     """
     Forward direction (flip stroke).
     speed 0.0-1.0. RPWM gets the duty; LPWM stays at 0.
+    Duty is clamped to [MIN_DUTY, 100] when non-zero to prevent stall under load.
     """
-    duty = max(0.0, min(1.0, speed)) * 100.0
+    raw  = max(0.0, min(1.0, speed)) * 100.0
+    duty = max(MIN_DUTY, raw) if raw > 0 else 0.0
     lpwm.ChangeDutyCycle(0)
     rpwm.ChangeDutyCycle(duty)
 
@@ -151,8 +183,10 @@ def drive_reverse(speed: float):
     """
     Reverse direction (return stroke).
     speed 0.0-1.0. LPWM gets the duty; RPWM stays at 0.
+    Duty is clamped to [MIN_DUTY, 100] when non-zero to prevent stall under load.
     """
-    duty = max(0.0, min(1.0, speed)) * 100.0
+    raw  = max(0.0, min(1.0, speed)) * 100.0
+    duty = max(MIN_DUTY, raw) if raw > 0 else 0.0
     rpwm.ChangeDutyCycle(0)
     lpwm.ChangeDutyCycle(duty)
 
@@ -165,9 +199,12 @@ def move_to(target: int, fast_speed: float, slow_speed: float,
     Drive motor until encoder reaches target (+/- DEADBAND).
 
     Uses fast_speed until within APPROACH_ZONE ticks, then slow_speed
-    for the final approach. Returns True on success, False on timeout.
+    for the final approach. Returns True on success, False on timeout or stall.
     """
-    t0 = time.time()
+    t0             = time.time()
+    stall_ref_pos  = get_pos()
+    stall_ref_time = t0
+
     while True:
         pos = get_pos()
         err = target - pos
@@ -176,9 +213,20 @@ def move_to(target: int, fast_speed: float, slow_speed: float,
             stop()
             return True
 
-        if time.time() - t0 > timeout:
+        now = time.time()
+
+        if now - t0 > timeout:
             stop()
             print(f"[FAULT] move_to({target}) timed out at pos={pos}")
+            return False
+
+        # Stall detection: fault if position hasn't moved in STALL_TIMEOUT seconds
+        if abs(pos - stall_ref_pos) > 2:
+            stall_ref_pos  = pos
+            stall_ref_time = now
+        elif now - stall_ref_time > STALL_TIMEOUT:
+            stop()
+            print(f"[FAULT] move_to({target}) stalled at pos={pos}")
             return False
 
         spd = slow_speed if abs(err) < APPROACH_ZONE else fast_speed
@@ -204,9 +252,6 @@ def flip_cycle(verbose: bool = True) -> bool:
 
     Returns True on success, False if any phase faults.
     """
-    mid    = TICKS_TO_APEX // 2
-    slowpt = int(TICKS_TO_APEX * 0.80)
-
     def log(msg):
         if verbose:
             print(f"[FLIP] {msg}  pos={get_pos()}")
@@ -214,11 +259,13 @@ def flip_cycle(verbose: bool = True) -> bool:
     log("-- starting flip --")
 
     log("Phase 1: RAMP_UP")
-    if not move_to(mid, fast_speed=RAMP_UP_SPEED, slow_speed=RAMP_UP_SPEED):
+    if not move_to(RAMP_END_TICKS,
+                   fast_speed=RAMP_UP_SPEED, slow_speed=RAMP_UP_SPEED):
         return False
 
     log("Phase 2: FLIP")
-    if not move_to(slowpt, fast_speed=FLIP_SPEED, slow_speed=FLIP_SPEED):
+    if not move_to(ACCEL_END_TICKS,
+                   fast_speed=FLIP_SPEED, slow_speed=FLIP_SPEED):
         return False
 
     log("Phase 3: RAMP_DOWN")
@@ -267,6 +314,8 @@ if __name__ == "__main__":
     print("Pan Flip Device -- BTS7960 + Ultraplanetary")
     print("============================================")
 
+    setup()
+
     # STEP 1 (first time only): uncomment these two lines to calibrate,
     # find TICKS_TO_APEX, then re-comment before running the flip loop.
     #
@@ -275,11 +324,22 @@ if __name__ == "__main__":
 
     zero_encoder()
     print(f"Encoder zeroed. TICKS_TO_APEX = {TICKS_TO_APEX}")
-    print("Starting flip loop. Press Ctrl-C to stop.\n")
+
+    if BUTTON_PIN is not None:
+        print(f"Button mode: press GPIO {BUTTON_PIN} to trigger a flip.")
+    else:
+        print("Auto mode: flipping continuously every 3 s.")
+    print("Press Ctrl-C to stop.\n")
 
     cycle = 0
     try:
         while True:
+            if BUTTON_PIN is not None:
+                # Wait for button press (active LOW), then debounce
+                while GPIO.input(BUTTON_PIN) == GPIO.HIGH:
+                    time.sleep(0.02)
+                time.sleep(0.05)
+
             cycle += 1
             print(f"-- Cycle #{cycle} --")
             ok = flip_cycle(verbose=True)
@@ -287,15 +347,12 @@ if __name__ == "__main__":
                 print("[WARN] Cycle faulted -- waiting 5 s before retry")
                 time.sleep(5.0)
                 zero_encoder()
-            else:
+            elif BUTTON_PIN is None:
                 time.sleep(3.0)
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
 
     finally:
-        stop()
-        rpwm.stop()
-        lpwm.stop()
-        GPIO.cleanup()
+        teardown()
         print("GPIO cleaned up.")
