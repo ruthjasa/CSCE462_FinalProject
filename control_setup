@@ -1,53 +1,103 @@
 import RPi.GPIO as GPIO
 import time
 
-PWM_PIN = 18
+# -----------------------
+# PINS
+# -----------------------
+RPWM = 18
+LPWM = 23
+ENC_A = 24
+ENC_B = 25
 
+# -----------------------
+# SETUP
+# -----------------------
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(PWM_PIN, GPIO.OUT)
+GPIO.setwarnings(False)
 
-pwm = GPIO.PWM(PWM_PIN, 50) 
-pwm.start(7.5)  # stop
+GPIO.setup(RPWM, GPIO.OUT)
+GPIO.setup(LPWM, GPIO.OUT)
+GPIO.setup(ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-# control
+rpwm = GPIO.PWM(RPWM, 1000)
+lpwm = GPIO.PWM(LPWM, 1000)
 
+rpwm.start(0)
+lpwm.start(0)
+
+# -----------------------
+# ENCODER
+# -----------------------
+encoder_pos = 0
+
+def encoder_callback(channel):
+    global encoder_pos
+    if GPIO.input(ENC_B):
+        encoder_pos += 1
+    else:
+        encoder_pos -= 1
+
+GPIO.add_event_detect(ENC_A, GPIO.BOTH, callback=encoder_callback)
+
+# -----------------------
+# MOTOR CONTROL
+# -----------------------
 def stop():
-    pwm.ChangeDutyCycle(7.5)
+    rpwm.ChangeDutyCycle(0)
+    lpwm.ChangeDutyCycle(0)
 
-def forward(speed=1.0):
-    # speed: 0.0 to 1.0
-    duty = 7.5 + (speed * 2.5)  # up to ~10
-    pwm.ChangeDutyCycle(duty)
+def forward(speed):
+    lpwm.ChangeDutyCycle(0)
+    rpwm.ChangeDutyCycle(speed)
 
-def reverse(speed=1.0):
-    duty = 7.5 - (speed * 2.5)  # down to ~5
-    pwm.ChangeDutyCycle(duty)
+def reverse(speed):
+    rpwm.ChangeDutyCycle(0)
+    lpwm.ChangeDutyCycle(speed)
 
-# flip
+# -----------------------
+# MOVE TO POSITION
+# -----------------------
+def move_to(target, speed=30):
+    global encoder_pos
 
-def flip_cycle():
-    print("Flipping...")
-
-    # Forward (flip)
-    forward(0.8)
-    time.sleep(0.4) 
-
-    stop()
-    time.sleep(0.3)
-
-    # Reverse (return)
-    reverse(0.6)
-    time.sleep(0.4)
-
-    stop()
-
-# loop
-
-try:
     while True:
-        flip_cycle()
-        time.sleep(3)
+        error = target - encoder_pos
+
+        if abs(error) < 5:
+            stop()
+            break
+
+        if error > 0:
+            forward(speed)
+        else:
+            reverse(speed)
+
+        time.sleep(0.01)
+
+# -----------------------
+# MAIN FLIP LOGIC
+# -----------------------
+try:
+    print("Starting flip test")
+
+    encoder_pos = 0
+
+    # Move forward (flip)
+    move_to(300, 40)   # adjust this number
+
+    time.sleep(0.5)
+
+    # Return back
+    move_to(0, 30)
+
+    print("Done")
 
 except KeyboardInterrupt:
-    pwm.stop()
+    pass
+
+finally:
+    stop()
+    rpwm.stop()
+    lpwm.stop()
     GPIO.cleanup()
