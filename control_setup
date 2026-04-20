@@ -1,161 +1,106 @@
 import RPi.GPIO as GPIO
 import time
-import threading
 
 # -----------------------
-# PIN ASSIGNMENTS
+# PINS
 # -----------------------
 RPWM_PIN = 18
 LPWM_PIN = 23
-ENC_A    = 24
-ENC_B    = 25
-BUTTON_PIN = None   # set to 21 if using button
-
 PWM_FREQ = 1000
-MIN_DUTY = 15.0
 
 # -----------------------
-# MOTION PARAMETERS
+# TIMING (need to figure these out)
 # -----------------------
-TICKS_TO_APEX = 400
-TARGET_HOME   = 0
+FORWARD_TIME = 0.6
+BACK_TIME    = 0.6
 
-RAMP_END_TICKS  = TICKS_TO_APEX // 2
-ACCEL_END_TICKS = int(TICKS_TO_APEX * 0.8)
+FORWARD_SPEED = 0.35
+BACK_SPEED    = 0.3
 
-RAMP_UP_SPEED   = 0.4
-FLIP_SPEED      = 0.7
-RAMP_DOWN_SPEED = 0.3
-RETURN_SPEED    = 0.5
-
-APPROACH_ZONE = 50
-DEADBAND      = 5
-
-DWELL_APEX = 0.2
-DWELL_HOME = 0.1
-
-# -----------------------
-# ENCODER
-# -----------------------
-encoder_pos = 0
-lock = threading.Lock()
-
-def encoder_callback(channel):
-    global encoder_pos
-    if GPIO.input(ENC_B):
-        encoder_pos += 1
-    else:
-        encoder_pos -= 1
-
-def get_pos():
-    with lock:
-        return encoder_pos
-
-def zero_encoder():
-    global encoder_pos
-    with lock:
-        encoder_pos = 0
+DWELL_TIME = 0.3
 
 # -----------------------
 # SETUP
 # -----------------------
-rpwm = None
-lpwm = None
-
 def setup():
-    global rpwm, lpwm
-
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
 
     GPIO.setup(RPWM_PIN, GPIO.OUT)
     GPIO.setup(LPWM_PIN, GPIO.OUT)
-    GPIO.setup(ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    if BUTTON_PIN is not None:
-        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
+    global rpwm, lpwm
     rpwm = GPIO.PWM(RPWM_PIN, PWM_FREQ)
     lpwm = GPIO.PWM(LPWM_PIN, PWM_FREQ)
 
     rpwm.start(0)
     lpwm.start(0)
 
-    GPIO.add_event_detect(ENC_A, GPIO.BOTH, callback=encoder_callback)
-
-# -----------------------
-# MOTOR CONTROL
-# -----------------------
 def stop():
     rpwm.ChangeDutyCycle(0)
     lpwm.ChangeDutyCycle(0)
 
 def drive_forward(speed):
-    duty = max(MIN_DUTY, speed * 100)
     lpwm.ChangeDutyCycle(0)
-    rpwm.ChangeDutyCycle(duty)
+    rpwm.ChangeDutyCycle(speed * 100)
+
+def ramp_forward(target_speed, duration=0.5):
+    steps = 20
+    for i in range(steps):
+        speed = target_speed * (i / steps)
+        drive_forward(speed)
+        time.sleep(duration / steps)
 
 def drive_reverse(speed):
-    duty = max(MIN_DUTY, speed * 100)
     rpwm.ChangeDutyCycle(0)
-    lpwm.ChangeDutyCycle(duty)
-
-# -----------------------
-# MOVE FUNCTION
-# -----------------------
-def move_to(target, speed_fast, speed_slow):
-    while True:
-        pos = get_pos()
-        error = target - pos
-
-        if abs(error) < DEADBAND:
-            stop()
-            return
-
-        speed = speed_slow if abs(error) < APPROACH_ZONE else speed_fast
-
-        if error > 0:
-            drive_forward(speed)
-        else:
-            drive_reverse(speed)
-
-        time.sleep(0.005)
+    lpwm.ChangeDutyCycle(speed * 100)
 
 # -----------------------
 # FLIP CYCLE
 # -----------------------
 def flip_cycle():
-    print("Phase 1: Ramp Up")
-    move_to(RAMP_END_TICKS, RAMP_UP_SPEED, RAMP_UP_SPEED)
+    print("Phase 1: move forward slowly")
 
-    print("Phase 2: Flip")
-    move_to(ACCEL_END_TICKS, FLIP_SPEED, FLIP_SPEED)
-
-    print("Phase 3: Slow Down")
-    move_to(TICKS_TO_APEX, RAMP_DOWN_SPEED, RAMP_DOWN_SPEED)
+    # Move into position gently
+    drive_forward(0.35)
+    time.sleep(0.5)
 
     stop()
-    time.sleep(DWELL_APEX)
+    time.sleep(0.1)
 
-    print("Phase 4: Return")
-    move_to(TARGET_HOME, RETURN_SPEED, RETURN_SPEED)
+    print("Phase 2: flip!")
+
+    # Strong burst to flip
+    drive_forward(1.0)
+    time.sleep(0.25)
+
+    print("Phase 3: follow through the flip")
+
+    # Keep moving but slightly less aggressive
+    drive_forward(0.7)
+    time.sleep(0.4)
 
     stop()
-    time.sleep(DWELL_HOME)
+    time.sleep(0.3)
+
+    print("Phase 4: Return to position")
+
+    drive_reverse(0.6)
+    time.sleep(0.8)
+
+    stop()
+    time.sleep(0.3)
 
 # -----------------------
 # MAIN
 # -----------------------
 try:
     setup()
-    zero_encoder()
 
-    print("Ready. Starting flip loop...\n")
+    print("Starting to flip")
 
     while True:
         flip_cycle()
-        time.sleep(2)
 
 except KeyboardInterrupt:
     print("Stopped")
