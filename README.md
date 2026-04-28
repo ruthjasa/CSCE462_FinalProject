@@ -12,10 +12,10 @@ Four-bar linkage (all wood):
 
 | Link | Total length | Center-to-center |
 |------|-------------|-----------------|
-| Ground (fixed to base) | 9.75" | 8.5" |
+| Ground (fixed to base) | 15.5" | 8.5" |
 | Input (motor-driven at B) | 5.875" | 5.0" |
 | Coupler (pan attaches here) | 16.25" | 15.0" |
-| Output (free pivot at A) | 13.55" | 12.3" |
+| Output (free pivot at A) | 9.5" | 12.3" |
 
 All pivot holes are 1" diameter for bearings. The input link motor end has a 5 mm hex hole to mate with the gearbox output shaft.
 
