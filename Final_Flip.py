@@ -1,3 +1,9 @@
+'''
+Pan Flip Device - Motor Controller
+Team 12: Ruth Jasadiredja, Lucus Kim
+CSCE 462 Final Project
+'''
+
 import RPi.GPIO as GPIO
 import time
 
