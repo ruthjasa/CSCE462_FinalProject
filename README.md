@@ -31,7 +31,6 @@ Pan: 8" diameter, 6" handle, 769 g.
 | Motor | REV HD Hex Motor (REV-41-1600) | 12 V brushed DC, 6000 RPM free, 8.5 A stall |
 | Gearbox | REV UltraPlanetary (3:1 × 4:1 × 5:1) | 60:1 total → ~109 RPM output, 5.75 Nm stall |
 | Motor driver | HiLetGo BTS7960 43 A H-Bridge | Dual-PWM direction control |
-| Encoder | Built into HD Hex Motor | 28 counts/rev at motor shaft = 1,680 counts/rev at output |
 | Power | 12 V battery (motor), separate supply (Pi) | Shared GND |
 
 ---
@@ -42,13 +41,13 @@ Pan: 8" diameter, 6" handle, 769 g.
 
 | BTS7960 pin | Signal | Raspberry Pi GPIO |
 |-------------|--------|-------------------|
-| RPWM (1) | Forward PWM | GPIO 12 (hardware PWM) |
-| LPWM (2) | Reverse PWM | GPIO 13 (hardware PWM) |
-| R_EN (3) | Forward half-bridge enable | GPIO 16 |
-| L_EN (4) | Reverse half-bridge enable | GPIO 20 |
+| RPWM (1) | Forward PWM | GPIO 18 (hardware PWM) |
+| LPWM (2) | Reverse PWM | GPIO 23 (hardware PWM) |
+| R_EN (3) | Forward half-bridge enable | 5 V |
+| L_EN (4) | Reverse half-bridge enable | 5 V |
 | R_IS (5) | Current sense | leave unconnected |
 | L_IS (6) | Current sense | leave unconnected |
-| VCC (7) | Logic supply | Pi 3.3 V or 5 V |
+| VCC (7) | Logic supply | leave unconnected |
 | GND (8) | Logic ground | Pi GND |
 
 ### BTS7960 Power
@@ -60,19 +59,6 @@ Pan: 8" diameter, 6" handle, 769 g.
 | M+ | Motor positive terminal |
 | M− | Motor negative terminal |
 
-### Encoder → Raspberry Pi
-
-| Encoder wire | Connection |
-|-------------|------------|
-| VCC | Pi 3.3 V |
-| GND | Pi GND |
-| Channel A | GPIO 23 |
-| Channel B | GPIO 24 |
-
-### Optional Trigger Button
-
-Wire a momentary push-button between **GPIO 21** and **GND**. The internal pull-up is enabled in software; the button is active LOW. Set `BUTTON_PIN = None` in `panflip.py` to disable and run in continuous auto-loop mode instead.
-
 ---
 
 ## Software
@@ -81,98 +67,74 @@ Wire a momentary push-button between **GPIO 21** and **GND**. The internal pull-
 
 | File | Description |
 |------|-------------|
-| `panflip.py` | Main motor controller — encoder FSM, full flip cycle |
-| `control_setup` | Early prototype using a single servo-style PWM signal (time-based, no encoder). Kept for reference only; superseded by `panflip.py`. |
+| `Final_Flip.py` | Main motor controllor logic, time-based code. |
+| `control_setup.py` | Early prototype using a single servo-style PWM signal (time-based, no encoder). Kept for reference only. |
+| `panflip.py` | Early prototype using encoder logic. Found to be too inaccurate and unstable. Kept for reference only.| 
 
 ---
 
-### `panflip.py` Architecture
+### `Final_Flip.py` Architecture
 
-#### Encoder ISR
+#### GPIO + PWM Initialization
 
-`_encoder_isr` is registered on both edges of channel A (`GPIO.BOTH`). On each edge it samples channel B to determine direction, incrementing or decrementing `_encoder_pos` under a threading lock. `get_pos()` and `zero_encoder()` are the public interface to the encoder state.
+The program begins by configuring the Raspberry Pi GPIO pins in BCM mode and disabling warnings. Two PWM outputs are created on pins RPWM (GPIO18) and LPWM (GPIO23) at 1 kHz to control motor direction through the BTS7960 driver. Both PWM channels start at 0% duty cycle to ensure the motor is initially stopped.
 
-#### `setup()` / `teardown()`
+#### Motor Control Layer (forward, reverse, stop)
 
-`setup()` must be called once before any motor command. It configures all GPIO pins, starts both PWM channels at 0% duty, enables the BTS7960 half-bridges, and attaches the encoder interrupt. `teardown()` stops PWM, releases GPIO, and should always be called on exit (the `finally` block in `__main__` guarantees this).
+These three functions directly control motor direction:
 
-#### `drive_forward()` / `drive_reverse()`
+- forward(speed): Activates RPWM while disabling LPWM, producing clockwise/forward rotation.
+- reverse(speed): Activates LPWM while disabling RPWM, producing counterclockwise/reverse rotation.
+- stop(): Sets both PWM signals to 0% duty cycle, immediately stopping motion.
 
-These set RPWM or LPWM duty cycle while holding the opposite channel at 0. Duty is clamped to a minimum of `MIN_DUTY` (15%) when non-zero, preventing the motor from stalling under load at very low commanded speeds.
+Speed is passed as a PWM duty cycle percentage (0–100), which determines motor torque and velocity.
 
-#### `move_to(target, fast_speed, slow_speed)`
+#### Flip Sequence Logic (Main Control Flow)
 
-Bang-bang position controller with two-speed approach:
+The system executes a single deterministic flip cycle in sequence:
 
-- Runs at `fast_speed` until within `APPROACH_ZONE` ticks of the target.
-- Switches to `slow_speed` for the final approach.
-- Returns `True` when within `DEADBAND` ticks of the target.
-- Returns `False` (and stops the motor) on two fault conditions:
-  - **Timeout:** move takes longer than `MOTION_TIMEOUT` seconds.
-  - **Stall:** encoder position doesn't change by more than 2 ticks within `STALL_TIMEOUT` (0.5 s), indicating a mechanical jam or encoder failure.
+1. Forward motion
+  - forward(75) drives the linkage forward for 0.5 seconds.
+  - This positions the pan to push the object forward and upward.
+2. Pause / stabilization
+  - stop() halts motion briefly (0.5 s).
+  - This allows momentum to settle before reversing.
+3. Reverse motion (flip action)
+  - reverse(80) applies a stronger backward torque.
+  - This creates the “kick” motion required to flip the object.
+4. Final stop
+  - Motor is stopped and held idle.
 
-#### `flip_cycle()`
+This sequence is not continuous control; it is an open-loop timed motion profile.
 
-Executes one complete flip-and-return as a 5-phase FSM:
+#### Timing-based Motion Control
 
-| Phase | Target | Speed | Purpose |
-|-------|--------|-------|---------|
-| 1 RAMP_UP | 50% of arc (`RAMP_END_TICKS`) | 50% | Gentle launch from home |
-| 2 FLIP | 80% of arc (`ACCEL_END_TICKS`) | 80% | Full-speed throw |
-| 3 RAMP_DOWN | apex (`TICKS_TO_APEX`) | 35% → 21% | Decelerate into apex |
-| 4 APEX | — | stopped | 0.20 s dwell while food is airborne |
-| 5 RETURN | home (`TARGET_HOME`) | 55% → 33% | Return to start |
+Instead of sensors or feedback (e.g., encoder control), the system relies entirely on fixed delays (time.sleep()):
 
-Returns `True` on success. Any phase returning `False` from `move_to()` propagates as a fault.
+- Forward duration: 0.5 s
+- Pause duration: 0.5 s
+- Reverse duration: 0.5 s
 
----
+This makes the system simpler but sensitive to load changes, battery voltage, and friction.
 
-### Tunable Parameters
+#### Safety and Cleanup (try / finally)
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `TICKS_TO_APEX` | 400 | Encoder ticks from home to flip apex — **must be measured empirically** |
-| `FLIP_SPEED` | 0.80 | Main arc speed (0.0–1.0 fraction of full PWM) |
-| `RAMP_UP_SPEED` | 0.50 | Gentle launch speed |
-| `RAMP_DOWN_SPEED` | 0.35 | Approach speed near apex |
-| `RETURN_SPEED` | 0.55 | Return-to-home speed |
-| `APPROACH_ZONE` | 60 ticks | Distance at which the slow approach speed engages |
-| `DEADBAND` | 6 ticks | Position tolerance for "at target" |
-| `DWELL_APEX` | 0.20 s | Hold time at apex (food in air) |
-| `MIN_DUTY` | 15% | Minimum PWM duty to guarantee movement under load |
-| `STALL_TIMEOUT` | 0.5 s | Time without position change before declaring a stall |
-| `BUTTON_PIN` | 21 | GPIO for manual flip trigger; `None` for auto-loop |
+The program is wrapped in a try-except-finally structure:
 
----
+- KeyboardInterrupt allows manual stopping via Ctrl+C
+- finally ensures:
+  - motor is stopped
+  - PWM channels are safely shut down
+  - GPIO pins are released (GPIO.cleanup())
 
-### Calibration (first run)
-
-1. Build and wire the full assembly.
-2. In `panflip.py` `__main__`, uncomment:
-   ```python
-   print_encoder_live(20)
-   raise SystemExit("Set TICKS_TO_APEX above, then re-run.")
-   ```
-3. Run the script and manually push the arm through the full flip arc by hand.
-4. Note the tick count printed when the pan reaches the apex.
-5. Set `TICKS_TO_APEX` to that value, re-comment the two lines above, and re-run.
+This prevents the motor from continuing to run or GPIO pins from locking after execution.
 
 ---
 
-### Running
+### System Behavior Summary
+The full system implements a two-phase open-loop flip motion:
 
-```bash
-python panflip.py
-```
+- Phase 1: Forward preload motion (positioning + energy buildup)
+- Phase 2: Reverse impulse motion (flip execution)
 
-- **Button mode** (`BUTTON_PIN = 21`): press the trigger button to execute one flip cycle.
-- **Auto mode** (`BUTTON_PIN = None`): continuously flips every 3 seconds.
-- **Ctrl-C** stops the loop cleanly and releases GPIO.
-
-On a fault (stall or timeout), the script waits 5 seconds, re-zeros the encoder, and retries.
-
----
-
-## Current Status
-
-Week 5 — integration week, combining software, electronics, and physical hardware for first full tests. `TICKS_TO_APEX` is a placeholder (400) and must be calibrated on the physical build before running the flip loop.
+No sensor feedback is used; behavior is entirely determined by PWM intensity + timing.
