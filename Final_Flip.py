@@ -1,6 +1,6 @@
 '''
 Pan Flip Device - Motor Controller
-Team 12: Ruth Jasadiredja, Lucus Kim
+Team 12: Ruth Jasadiredja, Lucas Kim
 CSCE 462 Final Project
 '''
 
@@ -8,18 +8,30 @@ import RPi.GPIO as GPIO
 import time
 
 # -----------------------
-# PINS
+# PIN CONFIGURATION
 # -----------------------
 RPWM = 18   # Forward
 LPWM = 23   # Reverse
 
+# -----------------------
+# MOTION PARAMETERS
+# -----------------------
+FORWARD_SPEED = 75
+REVERSE_SPEED = 80
+
+FORWARD_TIME = 0.5
+STOP_TIME = 0.5
+REVERSE_TIME = 0.5
+
+# -----------------------
+# SETUP
+# -----------------------
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
 GPIO.setup(RPWM, GPIO.OUT)
 GPIO.setup(LPWM, GPIO.OUT)
 
-# PWM setup
 rpwm = GPIO.PWM(RPWM, 1000)
 lpwm = GPIO.PWM(LPWM, 1000)
 
@@ -27,7 +39,7 @@ rpwm.start(0)
 lpwm.start(0)
 
 # -----------------------
-# FUNCTIONS
+# MOTOR FUNCTIONS
 # -----------------------
 def stop():
     rpwm.ChangeDutyCycle(0)
@@ -42,28 +54,36 @@ def reverse(speed):
     lpwm.ChangeDutyCycle(speed)
 
 # -----------------------
-# Flip Logic
+# FLIP FUNCTION
+# -----------------------
+def flip():
+    """
+    Executes one pan flip motion:
+    1. Forward motion positions the object
+    2. Pause stabilizes the system
+    3. Reverse motion provides impulse to flip
+    """
+    forward(FORWARD_SPEED)
+    time.sleep(FORWARD_TIME)
+
+    stop()
+    time.sleep(STOP_TIME)
+
+    reverse(REVERSE_SPEED)
+    time.sleep(REVERSE_TIME)
+
+    stop()
+
+# -----------------------
+# MAIN
 # -----------------------
 try:
     print("Starting flip")
-
-    # Device moves forward to move the object
-    forward(75)   # 75 for forward motion
-    time.sleep(0.5)
-
-    stop()
-    time.sleep(0.5)
-
-    # Device moves backward to move the object and flip
-    reverse(80)
-    time.sleep(0.5)
-
-    stop()
-
+    flip()
     print("Done")
 
 except KeyboardInterrupt:
-    pass
+    print("Interrupted")
 
 finally:
     stop()
